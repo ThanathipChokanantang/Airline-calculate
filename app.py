@@ -3,7 +3,8 @@ from google import genai
 from google.genai.errors import APIError
 import pandas as pd
 import io
-import json # ต้องใช้สำหรับจัดการโครงสร้างข้อมูลแบบ Step-by-Step
+import json
+import re # *** นำเข้า Regular Expression ***
 
 # --- 1. ข้อมูลคงที่ (Constants) ---
 AIRCRAFT_DATA = {
@@ -76,13 +77,7 @@ def check_airport_consistency(icao_code: str, city_name: str, continent: str):
         "ถ้าข้อมูลสอดคล้อง (ตรงตามโลกจริง) ให้ตอบว่า 'PASS'. ถ้าไม่สอดคล้อง ให้ตอบว่า 'FAIL: [คำอธิบายว่าทำไมไม่ตรงกัน]'. "
     )
     
-    # --- Mock Response สำหรับ Demo ---
-    if icao_code.upper() == "BKK" and city_name.lower() == "bangkok" and continent == "Asia":
-        return "PASS"
-    elif icao_code.upper() == "DMK" and city_name.lower() == "bangkok" and continent == "Asia":
-        return "PASS"
-    elif icao_code.upper() == "LHR" and city_name.lower() == "london" and continent == "Europe":
-        return "PASS"
+    # *** ลบ Mock Data สำหรับ Consistency Check ออก (ถ้ามี) ***
     
     # การเรียกใช้จริง:
     try:
@@ -99,42 +94,55 @@ def get_flight_distance(destination_icao: str):
     if client is None:
         return 0
 
+    destination_icao_upper = destination_icao.upper()
+
     prompt = (
         f"ค้นหาระยะทางบิน (Great Circle Distance) จากสนามบิน BKK (Suvarnabhumi, Bangkok, Thailand) "
-        f"ไปยังสนามบินปลายทางที่มี ICAO code คือ {destination_icao}. "
+        f"ไปยังสนามบินปลายทางที่มี ICAO code คือ {destination_icao_upper}. "
         "ให้แสดงผลเฉพาะ 'ระยะทางเป็นกิโลเมตร' เท่านั้น โดยเป็น **จำนวนเต็ม** และ **ไม่ใช่ค่าประมาณ**"
     )
 
-    # --- Mock Response สำหรับ Demo ---
-    if destination_icao.upper() == "LHR":
-        return 9553
-    # ... (ส่วน Mock อื่นๆ) ...
+    # *** ลบ Mock Response ทั้งหมดออก ***
     
     # การเรียกใช้จริง:
     try:
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        try:
-            return int(response.text.strip())
-        except ValueError:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        raw_text = response.text.strip()
+        
+        # *** การแก้ไข: ทำความสะอาดข้อความด้วย Regex ก่อนแปลงเป็นตัวเลข ***
+        # 1. ค้นหาตัวเลขที่อยู่ติดกันทั้งหมดในข้อความ
+        numbers = re.findall(r'\d+', raw_text)
+        
+        if numbers:
+            # คืนค่าตัวเลขชุดแรกที่พบ (ควรเป็นระยะทาง)
+            return int(numbers[0]) 
+        else:
+            # หากไม่พบตัวเลขเลย ให้คืนค่า 0
             return 0 
+            
     except APIError as e:
         st.error(f"API_ERROR: ไม่สามารถคำนวณระยะทางได้: {e}")
         return 0
+    except Exception as e:
+        st.error(f"Error during distance calculation: {e}")
+        return 0
+
 
 # --------------------------------------------------------------------------------------
-# ********** ฟังก์ชันที่แก้ไขเพื่อใช้ Step-by-Step Generation **********
+# ********** ฟังก์ชันที่ใช้ Step-by-Step Generation (ไม่เปลี่ยนแปลง) **********
 # --------------------------------------------------------------------------------------
 
 def generate_aircraft_data(client, aircraft_model, distance_km, destination_icao, destination_city):
     """
-    ฟังก์ชันย่อย: ให้ Gemini คำนวณข้อมูล 11 คอลัมน์สำหรับเครื่องบินแต่ละรุ่น
-    เราจะขอให้ Gemini ตอบกลับเป็น JSON เพื่อให้ตีความได้ง่ายกว่า CSV
+    ฟังก์ชันย่อย: ให้ Gemini คำนวณข้อมูล 11 คอลัมน์สำหรับเครื่องบินแต่ละรุ่นในรูปแบบ JSON
     """
     aircraft_info = AIRCRAFT_DATA.get(aircraft_model, {})
     
     # ถ้าพิสัยบินไม่พอ ให้ข้ามการเรียก API และคืนข้อมูล 0.0 ดาวทันที
     if distance_km > aircraft_info.get("range_km", 0):
-        # สร้างข้อมูล 11 คอลัมน์ โดยคอลัมน์ 10 เป็น 0.0 และคอลัมน์ 11 เป็นคำอธิบาย
         return [
             aircraft_model, aircraft_info.get("range_km", "N/A"), 
             f'{aircraft_info.get("eco", 0)}/{aircraft_info.get("bc", 0)}/{aircraft_info.get("first", 0)}',
@@ -161,21 +169,17 @@ def generate_aircraft_data(client, aircraft_model, distance_km, destination_icao
     """
 
     try:
-        # ใช้ JSON mode เพื่อบังคับให้ได้โครงสร้าง List ที่แน่นอน
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
-        
-        # คาดหวังว่า response.text คือ JSON List ของ 11 องค์ประกอบ
         data_list = json.loads(response.text)
         
         if isinstance(data_list, list) and len(data_list) == 11:
             return data_list
         else:
-            # ถ้าได้โครงสร้างผิด ให้คืนค่า Fail/N/A
-            st.warning(f"Gemini response structure incorrect for {aircraft_model}: {response.text[:50]}...")
+            st.warning(f"Gemini response structure incorrect for {aircraft_model}: Length {len(data_list)}")
             return [aircraft_model] + ["N/A"] * 9 + [1.0] + [f"โครงสร้างข้อมูลที่ Gemini ส่งคืนไม่ถูกต้อง (ความยาว {len(data_list)})"]
             
     except Exception as e:
@@ -194,10 +198,8 @@ def get_aircraft_evaluation(distance_km: int, destination_icao: str, destination
     
     all_data_rows = []
     
-    # วนลูปเรียก Gemini สำหรับเครื่องบินทุกรุ่น
     aircraft_models = list(AIRCRAFT_DATA.keys())
     
-    # เพิ่ม progress bar เพื่อแสดงความคืบหน้า
     progress_bar = st.progress(0, text="กำลังประเมินเครื่องบิน 0/7 รุ่น...")
 
     for i, model in enumerate(aircraft_models):
@@ -206,15 +208,12 @@ def get_aircraft_evaluation(distance_km: int, destination_icao: str, destination
         row = generate_aircraft_data(client, model, distance_km, destination_icao, destination_city)
         all_data_rows.append(row)
         
-    progress_bar.empty() # ล้าง progress bar เมื่อเสร็จสิ้น
+    progress_bar.empty()
 
     if not all_data_rows:
         return None
 
-    # แปลง List of Lists เป็น DataFrame และ CSV
     df = pd.DataFrame(all_data_rows)
-    
-    # แปลง DataFrame กลับเป็น CSV string (เพื่อความสอดคล้องกับโครงสร้างเดิม)
     csv_string = df.to_csv(header=False, index=False)
     return csv_string
 
@@ -237,7 +236,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
     icao_code = st.text_input(
         "**ICAO Code ของสนามบินปลายทาง**",
-        placeholder="เช่น LHR",
+        placeholder="เช่น HKT",
         max_chars=4,
         key="icao_input"
     ).upper()
@@ -245,7 +244,7 @@ with col1:
 with col2:
     city_name = st.text_input(
         "**ชื่อเมืองที่สนามบินตั้งอยู่ (ภาษาอังกฤษ)**",
-        placeholder="เช่น London",
+        placeholder="เช่น Phuket",
         key="city_input"
     )
 
@@ -307,12 +306,10 @@ if st.session_state.data_consistent:
 
         # 2.2 & 2.3 การประเมินเครื่องบินและการแสดงผล
         if st.session_state.evaluation_df is None:
-            # การเรียกใช้ get_aircraft_evaluation จะเรียก generate_aircraft_data ซ้ำ 7 ครั้ง
             csv_result = get_aircraft_evaluation(distance, icao_code, city_name)
                 
             if csv_result and not csv_result.startswith("API_ERROR"):
                 try:
-                    # แปลง CSV ที่ได้จากฟังก์ชัน (ซึ่งถูกสร้างจาก DataFrame) เป็น DataFrame อีกครั้ง
                     df = pd.read_csv(io.StringIO(csv_result), header=None)
                     
                     if df.shape[1] == 11:
@@ -346,10 +343,8 @@ if st.session_state.data_consistent:
                 return f"{stars}{half_star} ({score:.1f})"
             
             display_df = st.session_state.evaluation_df.copy()
-            # แปลงคอลัมน์ความเหมาะสมเป็นดาว
             display_df['ความเหมาะสม (ดาว) Format'] = display_df['ความเหมาะสม (ดาว)'].astype(str).apply(format_star)
             
-            # ตารางแสดงผล
             st.dataframe(
                 display_df[[
                     "ชื่อรุ่นเครื่องบิน", "พิสัยการบิน (กม.)", "จำนวนที่นั่ง (eco/bc/first)", 
